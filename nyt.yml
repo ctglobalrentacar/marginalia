@@ -1,0 +1,70 @@
+name: Update NYT best sellers
+
+on:
+  schedule:
+    - cron: "17 9 * * *"   # every day, 09:17 UTC
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the lists from the New York Times Books API
+        env:
+          NYT_API_KEY: ${{ secrets.NYT_API_KEY }}
+        run: |
+          curl -fsS "https://api.nytimes.com/svc/books/v3/lists/overview.json?api-key=${NYT_API_KEY}" -o /tmp/nyt-raw.json
+
+      - name: Build nyt.json
+        run: |
+          node - <<'JS'
+          const fs = require('fs');
+          const raw = JSON.parse(fs.readFileSync('/tmp/nyt-raw.json', 'utf8'));
+          const res = raw.results || {};
+          const lists = res.lists || [];
+          const small = new Set(['a','an','the','of','and','or','to','in','on','at','for','by','but','with']);
+          const tc = s => String(s || '').toLowerCase().split(' ')
+            .map((w, i) => (i > 0 && small.has(w)) ? w : w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+          const pick = names => { for (const n of names) { const l = lists.find(x => x.list_name_encoded === n); if (l) return l; } return null; };
+          const conv = l => l ? l.books.slice(0, 15).map(b => ({
+            rank: b.rank,
+            title: tc(b.title),
+            author: String(b.author || '').replace(/^by /i, ''),
+            cover: b.book_image || '',
+            isbn: b.primary_isbn13 || '',
+            weeks: b.weeks_on_list || 0,
+            desc: b.description || '',
+            publisher: b.publisher || ''
+          })) : [];
+          const out = {
+            updated: new Date().toISOString().slice(0, 10),
+            published: res.published_date || '',
+            lists: {
+              fiction: conv(pick(['combined-print-and-e-book-fiction', 'hardcover-fiction'])),
+              nonfiction: conv(pick(['combined-print-and-e-book-nonfiction', 'hardcover-nonfiction']))
+            }
+          };
+          if (!out.lists.fiction.length && !out.lists.nonfiction.length) { console.error('No lists found'); process.exit(1); }
+          fs.writeFileSync('nyt.json', JSON.stringify(out));
+          console.log('fiction', out.lists.fiction.length, 'nonfiction', out.lists.nonfiction.length);
+          JS
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add nyt.json
+          if git diff --cached --quiet; then echo "No change"; exit 0; fi
+          git commit -m "Update NYT best sellers"
+          git push
+
+      - name: Ask GitHub Pages to rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
