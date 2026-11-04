@@ -84,7 +84,7 @@ jobs:
             out.ratings = [];
             for (const off of [0, 100, 200, 300]) {
               const pgb = await booksQuery('{rating: {_gt: 0}}', ['{users_count: desc_nulls_last}', '{users_count: desc}'], 100, off);
-              pgb.forEach(b => { if (b.title && b.rating) out.ratings.push({ t: b.title, a: String(b.author || '').split(',')[0], r: b.rating, c: b.rc || b.users || 0 }); });
+              pgb.forEach(b => { if (b.title && b.rating) out.ratings.push({ t: b.title, a: String(b.author || '').split(',')[0], r: b.rating, c: b.rc || b.users || 0, v: b.cover || '' }); });
               if (pgb.length < 100) break;
             }
             console.log('upcoming', out.upcoming.length, 'trending', out.trending.length, 'ratings', out.ratings.length);
