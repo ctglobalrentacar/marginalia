@@ -38,6 +38,8 @@ jobs:
           const day = n => { const d = new Date(Date.now() + n * 864e5); return d.toISOString().slice(0, 10); };
           // two ways of asking for the cover and authors, in case one is not available
           const FIELD_SETS = [
+            'id title slug release_date pages rating ratings_count users_count cached_image cached_contributors',
+            'id title slug release_date pages rating ratings_count users_count image { url } contributions(limit: 2) { author { name } }',
             'id title slug release_date pages rating users_count cached_image cached_contributors',
             'id title slug release_date pages rating users_count image { url } contributions(limit: 2) { author { name } }',
             'id title slug release_date pages'
@@ -50,13 +52,13 @@ jobs:
               if (Array.isArray(b.cached_contributors)) names = b.cached_contributors.map(c => c && c.author && c.author.name).filter(Boolean);
               else if (Array.isArray(b.contributions)) names = b.contributions.map(c => c && c.author && c.author.name).filter(Boolean);
             } catch (e) {}
-            return { id: b.id, title: b.title || '', slug: b.slug || '', author: names.slice(0, 2).join(', '), pages: b.pages || 0, rel: b.release_date || '', cover, rating: b.rating ? Math.round(b.rating * 100) / 100 : 0, users: b.users_count || 0 };
+            return { id: b.id, title: b.title || '', slug: b.slug || '', author: names.slice(0, 2).join(', '), pages: b.pages || 0, rel: b.release_date || '', cover, rating: b.rating ? Math.round(b.rating * 100) / 100 : 0, rc: b.ratings_count || 0, users: b.users_count || 0 };
           };
-          async function booksQuery(where, order, limit) {
+          async function booksQuery(where, order, limit, offset) {
             for (const f of FIELD_SETS) {
               for (const ord of order) {
                 try {
-                  const d = await gql('query { books(where: ' + where + ', order_by: ' + ord + ', limit: ' + limit + ') { ' + f + ' } }');
+                  const d = await gql('query { books(where: ' + where + ', order_by: ' + ord + ', limit: ' + limit + ', offset: ' + (offset || 0) + ') { ' + f + ' } }');
                   return (d.books || []).map(conv);
                 } catch (e) { errors.push('books[' + FIELD_SETS.indexOf(f) + ']: ' + e.message); }
               }
@@ -78,7 +80,14 @@ jobs:
               const pos = new Map(ids.map((x, i) => [Number(x), i]));
               out.trending = list.sort((a, b) => (pos.get(a.id) ?? 99) - (pos.get(b.id) ?? 99)).filter(b => b.title).slice(0, 20);
             } catch (e) { errors.push('trending: ' + e.message); }
-            console.log('upcoming', out.upcoming.length, 'trending', out.trending.length);
+            // ratings for the most-read books, so the app can show Hardcover scores on book pages
+            out.ratings = [];
+            for (const off of [0, 100, 200, 300]) {
+              const pgb = await booksQuery('{rating: {_gt: 0}}', ['{users_count: desc_nulls_last}', '{users_count: desc}'], 100, off);
+              pgb.forEach(b => { if (b.title && b.rating) out.ratings.push({ t: b.title, a: String(b.author || '').split(',')[0], r: b.rating, c: b.rc || b.users || 0 }); });
+              if (pgb.length < 100) break;
+            }
+            console.log('upcoming', out.upcoming.length, 'trending', out.trending.length, 'ratings', out.ratings.length);
             if (errors.length) console.log('errors:\n' + errors.join('\n'));
             if (!out.upcoming.length && !out.trending.length) { console.error('Nothing came back'); process.exit(1); }
             fs.writeFileSync('hardcover.json', JSON.stringify(out));
