@@ -1,0 +1,100 @@
+name: Update Hardcover upcoming and trending
+
+on:
+  schedule:
+    - cron: "41 10 * * *"   # every day, 10:41 UTC
+  workflow_dispatch:         # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build hardcover.json
+        env:
+          HARDCOVER_TOKEN: ${{ secrets.HARDCOVER_TOKEN }}
+        run: |
+          node - <<'JS'
+          const fs = require('fs');
+          const URL_ = 'https://api.hardcover.app/v1/graphql';
+          let tok = String(process.env.HARDCOVER_TOKEN || '').trim();
+          if (!tok) { console.error('HARDCOVER_TOKEN secret is empty'); process.exit(1); }
+          if (!/^bearer /i.test(tok)) tok = 'Bearer ' + tok;
+          const errors = [];
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function gql(query) {
+            const r = await fetch(URL_, { method: 'POST', headers: { 'content-type': 'application/json', authorization: tok, 'user-agent': 'marginalia-action' }, body: JSON.stringify({ query }) });
+            const txt = await r.text();
+            let j; try { j = JSON.parse(txt); } catch (e) { throw new Error('HTTP ' + r.status + ' ' + txt.slice(0, 200)); }
+            if (j.errors && j.errors.length) throw new Error(j.errors.map(e => e.message).join('; ').slice(0, 300));
+            await sleep(1100);
+            return j.data;
+          }
+          const day = n => { const d = new Date(Date.now() + n * 864e5); return d.toISOString().slice(0, 10); };
+          // two ways of asking for the cover and authors, in case one is not available
+          const FIELD_SETS = [
+            'id title slug release_date pages rating users_count cached_image cached_contributors',
+            'id title slug release_date pages rating users_count image { url } contributions(limit: 2) { author { name } }',
+            'id title slug release_date pages'
+          ];
+          const conv = b => {
+            let cover = '';
+            try { cover = (b.cached_image && b.cached_image.url) || (b.image && b.image.url) || ''; } catch (e) {}
+            let names = [];
+            try {
+              if (Array.isArray(b.cached_contributors)) names = b.cached_contributors.map(c => c && c.author && c.author.name).filter(Boolean);
+              else if (Array.isArray(b.contributions)) names = b.contributions.map(c => c && c.author && c.author.name).filter(Boolean);
+            } catch (e) {}
+            return { id: b.id, title: b.title || '', slug: b.slug || '', author: names.slice(0, 2).join(', '), pages: b.pages || 0, rel: b.release_date || '', cover, rating: b.rating ? Math.round(b.rating * 100) / 100 : 0, users: b.users_count || 0 };
+          };
+          async function booksQuery(where, order, limit) {
+            for (const f of FIELD_SETS) {
+              for (const ord of order) {
+                try {
+                  const d = await gql('query { books(where: ' + where + ', order_by: ' + ord + ', limit: ' + limit + ') { ' + f + ' } }');
+                  return (d.books || []).map(conv);
+                } catch (e) { errors.push('books[' + FIELD_SETS.indexOf(f) + ']: ' + e.message); }
+              }
+            }
+            return [];
+          }
+          (async () => {
+            const out = { updated: day(0), upcoming: [], trending: [], errors };
+            // upcoming: release date after today, most added first
+            const up = await booksQuery('{release_date: {_gt: "' + day(0) + '", _lt: "' + day(800) + '"}}', ['{users_count: desc_nulls_last}', '{users_count: desc}'], 80);
+            out.upcoming = up.filter(b => b.title && b.rel && b.author).slice(0, 40);
+            // trending: ask for the ids, then load the books
+            try {
+              const d = await gql('query { books_trending(from: "' + day(-90) + '", to: "' + day(0) + '", limit: 25, offset: 0) { ids } }');
+              let ids = d.books_trending && d.books_trending.ids;
+              if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch (e) {} }
+              if (!Array.isArray(ids) || !ids.length) throw new Error('books_trending returned ' + JSON.stringify(d).slice(0, 200));
+              const list = await booksQuery('{id: {_in: [' + ids.join(',') + ']}}', ['{users_count: desc_nulls_last}'], 50);
+              const pos = new Map(ids.map((x, i) => [Number(x), i]));
+              out.trending = list.sort((a, b) => (pos.get(a.id) ?? 99) - (pos.get(b.id) ?? 99)).filter(b => b.title).slice(0, 20);
+            } catch (e) { errors.push('trending: ' + e.message); }
+            console.log('upcoming', out.upcoming.length, 'trending', out.trending.length);
+            if (errors.length) console.log('errors:\n' + errors.join('\n'));
+            if (!out.upcoming.length && !out.trending.length) { console.error('Nothing came back'); process.exit(1); }
+            fs.writeFileSync('hardcover.json', JSON.stringify(out));
+          })().catch(e => { console.error(e); process.exit(1); });
+          JS
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add hardcover.json
+          if git diff --cached --quiet; then echo "No change"; exit 0; fi
+          git commit -m "Update Hardcover upcoming and trending"
+          git push
+
+      - name: Ask GitHub Pages to rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
